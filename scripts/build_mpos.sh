@@ -307,7 +307,7 @@ elif [ "$target" == "wasm" ]; then
 
 	# Add asyncio to the webassembly variant manifest if not already present.
 	wasm_manifile="$codebasedir"/lvgl_micropython/lib/micropython/ports/webassembly/variants/manifest.py
-	if [ -f "$wasm_manifile" ] && ! grep asyncio "$wasm_manifile"; then
+	if [ -f "$wasm_manifile" ] && ! grep -q asyncio "$wasm_manifile"; then
 		echo "Adding asyncio to $wasm_manifile"
 		echo 'include("$(MPY_DIR)/extmod/asyncio") # needed by aiohttp/websockets' >> "$wasm_manifile"
 	fi
@@ -315,7 +315,7 @@ elif [ "$target" == "wasm" ]; then
 	# Comment out @micropython.viper (not supported by the WASM cross-compiler).
 	echo "Temporarily commenting out @micropython.viper decorator for WASM build..."
 	stream_wav_file="$codebasedir"/internal_filesystem/lib/mpos/audio/stream_wav.py
-	sed -i.backup 's/^@micropython\.viper$/#@micropython.viper/' "$stream_wav_file"
+	sed -i 's/^@micropython\.viper$/#@micropython.viper/' "$stream_wav_file"
 
 	# ── Compile mpy-cross (required for frozen manifest) ──────────────────
 	echo "Compiling mpy-cross..."
@@ -354,8 +354,7 @@ elif [ "$target" == "wasm" ]; then
 
 	# ── Restore @micropython.viper ────────────────────────────────────────
 	echo "Restoring @micropython.viper decorator..."
-	sed -i.backup 's/^#@micropython\.viper$/@micropython.viper/' "$stream_wav_file"
-	rm "$stream_wav_file".backup
+	sed -i 's/^#@micropython\.viper$/@micropython.viper/' "$stream_wav_file"
 
 else
 	echo "invalid target $target"

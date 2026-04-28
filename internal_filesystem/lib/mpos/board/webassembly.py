@@ -71,10 +71,13 @@ except ImportError as e:
 try:
     from mpos import BatteryManager
 
+    # Placeholder ADC reading for the simulated battery voltage on WASM/desktop.
+    SIMULATED_BATTERY_ADC = 999
+
     def _adc_to_voltage(adc_value):
         return adc_value * (3.3 / 4095) * 2
 
-    BatteryManager.init_adc(999, _adc_to_voltage)
+    BatteryManager.init_adc(SIMULATED_BATTERY_ADC, _adc_to_voltage)
 except Exception as e:
     print(f"webassembly.py: BatteryManager init skipped: {e}")
 

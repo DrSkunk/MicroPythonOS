@@ -150,6 +150,8 @@ def detect_board():
     import sys
     if sys.platform == "linux" or sys.platform == "darwin": # linux and macOS
         return "linux"
+    elif sys.platform == "webassembly": # Emscripten / browser
+        return "webassembly"
     elif sys.platform == "esp32":
 
         '''

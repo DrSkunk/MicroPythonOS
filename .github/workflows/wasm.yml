@@ -1,0 +1,85 @@
+name: Build MicroPythonOS WebAssembly
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch: # allow manual workflow starts
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js (required by Emscripten)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache emsdk
+        id: cache-emsdk
+        uses: actions/cache@v4
+        with:
+          path: ~/emsdk
+          key: emsdk-${{ runner.os }}-latest
+
+      - name: Install Emscripten SDK
+        if: steps.cache-emsdk.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/emscripten-core/emsdk.git ~/emsdk
+          ~/emsdk/emsdk install latest
+          ~/emsdk/emsdk activate latest
+
+      - name: Verify emcc is available
+        run: |
+          source ~/emsdk/emsdk_env.sh
+          emcc --version
+
+      - name: Extract OS version
+        id: version
+        run: |
+          OS_VERSION=$(grep "release = " internal_filesystem/lib/mpos/build_info.py | cut -d "=" -f 2 | cut -d "#" -f 1 | tr -d " " | tr -d '"')
+          echo "OS_VERSION=$OS_VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $OS_VERSION"
+
+      - name: Build MicroPythonOS WebAssembly
+        env:
+          EMSDK: ~/emsdk
+        run: |
+          ./scripts/build_mpos.sh wasm
+
+      - name: Rename build artefacts with version
+        run: |
+          cp lvgl_micropython/build/micropython.mjs \
+             lvgl_micropython/build/MicroPythonOS_wasm_${{ steps.version.outputs.OS_VERSION }}.mjs
+          cp lvgl_micropython/build/micropython.wasm \
+             lvgl_micropython/build/MicroPythonOS_wasm_${{ steps.version.outputs.OS_VERSION }}.wasm
+
+      - name: Upload .mjs artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MicroPythonOS_wasm_${{ steps.version.outputs.OS_VERSION }}.mjs
+          path: lvgl_micropython/build/MicroPythonOS_wasm_${{ steps.version.outputs.OS_VERSION }}.mjs
+          retention-days: 7
+
+      - name: Upload .wasm artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MicroPythonOS_wasm_${{ steps.version.outputs.OS_VERSION }}.wasm
+          path: lvgl_micropython/build/MicroPythonOS_wasm_${{ steps.version.outputs.OS_VERSION }}.wasm
+          retention-days: 7
+
+      - name: Upload HTML shell artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MicroPythonOS_wasm_${{ steps.version.outputs.OS_VERSION }}_index.html
+          path: lvgl_micropython/build/index.html
+          retention-days: 7

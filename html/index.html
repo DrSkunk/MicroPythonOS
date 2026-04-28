@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<!--
+  MicroPythonOS – WebAssembly shell
+  ==================================
+  This page loads the Emscripten-compiled MicroPython module
+  (micropython.mjs / micropython.wasm) and exposes:
+
+    • A <canvas> element for future LVGL canvas rendering.
+    • A terminal panel that displays stdout / stderr output.
+    • A REPL input line for typing Python expressions.
+
+  Serving requirements
+  ─────────────────────
+  If pthreads are enabled (required for SharedArrayBuffer), the server must
+  send:
+      Cross-Origin-Opener-Policy: same-origin
+      Cross-Origin-Embedder-Policy: require-corp
+
+  Quick local server:
+      emrun --no_browser .          # Emscripten's built-in dev server
+      python3 -m http.server 8080   # No COOP/COEP – pthreads will be disabled
+
+  Build
+  ─────
+  Run from the repository root:
+      ./scripts/build_mpos.sh wasm
+  Artefacts are placed in lvgl_micropython/build/.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MicroPythonOS – WebAssembly</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 1rem;
+      gap: 1rem;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      color: #a0d8ef;
+      letter-spacing: 0.05em;
+    }
+
+    /* ── Canvas (used by LVGL when compiled with Emscripten SDL2) ── */
+    #canvas-container {
+      border: 2px solid #3a3a5e;
+      border-radius: 6px;
+      overflow: hidden;
+      background: #000;
+      line-height: 0; /* remove inline-block gap */
+    }
+
+    canvas#lvgl {
+      display: block;
+      image-rendering: pixelated;
+      width: 320px;
+      height: 240px;
+    }
+
+    /* ── Terminal ─────────────────────────────────────────────────── */
+    #terminal-container {
+      width: min(640px, 100%);
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    #terminal {
+      background: #0d0d1a;
+      border: 1px solid #3a3a5e;
+      border-radius: 4px;
+      padding: 0.6rem 0.8rem;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 0.85rem;
+      height: 300px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.45;
+    }
+
+    #terminal .stdout { color: #c8ffc8; }
+    #terminal .stderr { color: #ffb3b3; }
+    #terminal .info   { color: #a0d8ef; }
+
+    #repl-row {
+      display: flex;
+      gap: 0.4rem;
+    }
+
+    #repl-prompt {
+      padding: 0.4rem 0.6rem;
+      background: #0d0d1a;
+      border: 1px solid #3a3a5e;
+      border-radius: 4px;
+      color: #a0d8ef;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 0.85rem;
+      flex: 1;
+      outline: none;
+    }
+
+    #repl-prompt:focus { border-color: #6a8fd8; }
+
+    button {
+      padding: 0.4rem 0.9rem;
+      background: #2a4080;
+      color: #e0e0e0;
+      border: 1px solid #3a5aaa;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      transition: background 0.15s;
+    }
+    button:hover { background: #3a50a0; }
+    button:disabled { opacity: 0.4; cursor: default; }
+
+    #status {
+      font-size: 0.78rem;
+      color: #8888aa;
+    }
+  </style>
+</head>
+<body>
+  <h1>MicroPythonOS · WebAssembly</h1>
+
+  <!--
+    Canvas target for LVGL (SDL2 display via Emscripten).
+    When MicroPython is built with lvgl_micropython + USE_SDL=2, Emscripten
+    maps SDL2 rendering calls to this canvas element.
+    The id "canvas" is the default Emscripten target; Module.canvas below
+    overrides it so we can use a custom id.
+  -->
+  <div id="canvas-container">
+    <canvas id="lvgl" width="320" height="240"
+            oncontextmenu="event.preventDefault()"
+            tabindex="-1">
+    </canvas>
+  </div>
+
+  <div id="terminal-container">
+    <div id="terminal"></div>
+    <div id="repl-row">
+      <input id="repl-prompt" type="text" placeholder=">>> Python expression…"
+             autocomplete="off" spellcheck="false" disabled />
+      <button id="run-btn" disabled>Run</button>
+    </div>
+    <div id="status">Loading MicroPython…</div>
+  </div>
+
+  <script type="module">
+    // ── DOM helpers ──────────────────────────────────────────────────────────
+    const terminal = document.getElementById('terminal');
+    const replInput = document.getElementById('repl-prompt');
+    const runBtn = document.getElementById('run-btn');
+    const statusEl = document.getElementById('status');
+
+    function appendTerminal(text, cls) {
+      const span = document.createElement('span');
+      span.className = cls;
+      span.textContent = text;
+      terminal.appendChild(span);
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
+
+    // ── Load MicroPython module ──────────────────────────────────────────────
+    // The build produces micropython.mjs (ES module) + micropython.wasm.
+    // The module factory is exported as _createMicroPythonModule.
+    let mp = null;
+
+    try {
+      // Dynamic import of the Emscripten-generated ES module.
+      const { default: createMP } = await import('./micropython.mjs');
+
+      mp = await createMP({
+        // Route the canvas for LVGL/SDL2 rendering.
+        canvas: document.getElementById('lvgl'),
+
+        // Capture stdout.
+        print(text) {
+          appendTerminal(text + '\n', 'stdout');
+        },
+
+        // Capture stderr.
+        printErr(text) {
+          appendTerminal(text + '\n', 'stderr');
+        },
+
+        // Suppress the default "Downloading…" progress output.
+        setStatus(msg) {
+          if (msg) setStatus(msg);
+        },
+      });
+
+      // ── Initialise MicroPython runtime ────────────────────────────────────
+      // mp_js_init sets the heap size (bytes).  16 MiB is a reasonable default
+      // for MicroPythonOS; increase for apps that allocate large buffers.
+      const HEAP_SIZE = 16 * 1024 * 1024;
+      mp.ccall('mp_js_init', null, ['number'], [HEAP_SIZE]);
+
+      // ── Run the frozen boot sequence ─────────────────────────────────────
+      // Frozen files from manifests/manifest.py are embedded in the .wasm;
+      // executing "import main" triggers the MicroPythonOS boot sequence.
+      // If LVGL is not available this will raise an ImportError that is
+      // caught inside the frozen main.py and printed to the terminal above.
+      mp.ccall('mp_js_do_exec', null, ['string'], ['import main']);
+
+      // ── Enable REPL input ─────────────────────────────────────────────────
+      replInput.disabled = false;
+      runBtn.disabled = false;
+      replInput.focus();
+      setStatus('MicroPython ready');
+      appendTerminal('MicroPython WebAssembly – type Python expressions below\n', 'info');
+
+    } catch (err) {
+      appendTerminal(`Failed to load MicroPython: ${err}\n`, 'stderr');
+      setStatus('Load error – see terminal above');
+      console.error(err);
+    }
+
+    // ── REPL ─────────────────────────────────────────────────────────────────
+    function runRepl() {
+      if (!mp) return;
+      const code = replInput.value.trim();
+      if (!code) return;
+      appendTerminal(`>>> ${code}\n`, 'info');
+      replInput.value = '';
+      try {
+        mp.ccall('mp_js_do_exec', null, ['string'], [code]);
+      } catch (e) {
+        appendTerminal(`REPL error: ${e}\n`, 'stderr');
+      }
+    }
+
+    runBtn.addEventListener('click', runRepl);
+    replInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') runRepl();
+    });
+
+    // ── Forward pointer events to SDL2 / LVGL ────────────────────────────────
+    // When built with Emscripten's SDL2 port, pointer events on the canvas are
+    // handled natively by SDL.  The listeners below are a safety net for builds
+    // where the SDL event loop is not wired in automatically.
+    const canvas = document.getElementById('lvgl');
+    function canvasXY(e) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const src = e.touches ? e.touches[0] : e;
+      return {
+        x: Math.round((src.clientX - rect.left) * scaleX),
+        y: Math.round((src.clientY - rect.top) * scaleY),
+      };
+    }
+
+    ['mousedown', 'mousemove', 'mouseup'].forEach(type => {
+      canvas.addEventListener(type, e => e.preventDefault(), { passive: false });
+    });
+    ['touchstart', 'touchmove', 'touchend'].forEach(type => {
+      canvas.addEventListener(type, e => e.preventDefault(), { passive: false });
+    });
+  </script>
+</body>
+</html>

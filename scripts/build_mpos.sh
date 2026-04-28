@@ -9,13 +9,14 @@ buildtype="$2"
 
 if [ -z "$target" ]; then
     echo "Usage: $0 target"
-    echo "Usage: $0 <esp32 or esp32-small or unix or macOS>"
+    echo "Usage: $0 <esp32 or esp32-small or unix or macOS or wasm>"
     echo "Example: $0 unix"
     echo "Example: $0 macOS"
     echo "Example: $0 esp32"
     echo "Example: $0 esp32-small"
     echo "Example: $0 esp32s3"
     echo "Example: $0 unphone"
+    echo "Example: $0 wasm"
     echo "Example: $0 clean"
 	exit 1
 fi
@@ -251,6 +252,111 @@ PY
 		echo "Restoring unix Makefile CWARN..."
 		mv "$unix_makefile".backup "$unix_makefile"
 	fi
+elif [ "$target" == "wasm" ]; then
+	# ── WebAssembly build via Emscripten ──────────────────────────────────
+	#
+	# This target builds MicroPythonOS as a .wasm/.mjs bundle that can be
+	# loaded in a web browser.
+	#
+	# Prerequisites
+	# ─────────────
+	# 1. Emscripten SDK (emsdk) must be installed and activated.
+	#    Either set EMSDK to the emsdk root directory before running this
+	#    script, or install it at ~/emsdk:
+	#
+	#      git clone https://github.com/emscripten-core/emsdk.git ~/emsdk
+	#      ~/emsdk/emsdk install latest
+	#      ~/emsdk/emsdk activate latest
+	#
+	# 2. Node.js >= 16 is required by Emscripten.
+	#
+	# LVGL note
+	# ─────────
+	# lvgl_micropython/make.py does not yet support a "webassembly" target,
+	# so this build uses the upstream MicroPython ports/webassembly Makefile
+	# directly.  This produces a plain MicroPython WASM module (no LVGL).
+	# Frozen Python files from manifests/manifest.py are included, but any
+	# code that imports "lvgl" will raise an ImportError at runtime.
+	#
+	# When lvgl_micropython gains a webassembly builder, replace the
+	# make invocation below with:
+	#   python3 make.py webassembly DISPLAY=sdl_display INDEV=sdl_pointer \
+	#       LV_CFLAGS="-s USE_SDL=2" "$frozenmanifest"
+	# That will compile LVGL with Emscripten's SDL2 port (USE_SDL=2) and
+	# route SDL events to the browser <canvas> element.
+
+	# ── Locate / activate emsdk ───────────────────────────────────────────
+	EMSDK_PATH="${EMSDK:-$HOME/emsdk}"
+	if [ ! -f "$EMSDK_PATH/emsdk_env.sh" ]; then
+		echo "ERROR: emsdk not found at $EMSDK_PATH"
+		echo "Set the EMSDK environment variable to the emsdk root directory,"
+		echo "or install it at ~/emsdk. See:"
+		echo "  https://github.com/emscripten-core/emsdk#installation"
+		exit 1
+	fi
+	# shellcheck source=/dev/null
+	source "$EMSDK_PATH/emsdk_env.sh"
+
+	if ! command -v emcc >/dev/null 2>&1; then
+		echo "ERROR: emcc not found after sourcing $EMSDK_PATH/emsdk_env.sh"
+		exit 1
+	fi
+	echo "Using emcc: $(emcc --version | head -1)"
+
+	# ── Shared pre-processing (same as unix target) ───────────────────────
+
+	# Add asyncio to the webassembly variant manifest if not already present.
+	wasm_manifile="$codebasedir"/lvgl_micropython/lib/micropython/ports/webassembly/variants/manifest.py
+	if [ -f "$wasm_manifile" ] && ! grep asyncio "$wasm_manifile"; then
+		echo "Adding asyncio to $wasm_manifile"
+		echo 'include("$(MPY_DIR)/extmod/asyncio") # needed by aiohttp/websockets' >> "$wasm_manifile"
+	fi
+
+	# Comment out @micropython.viper (not supported by the WASM cross-compiler).
+	echo "Temporarily commenting out @micropython.viper decorator for WASM build..."
+	stream_wav_file="$codebasedir"/internal_filesystem/lib/mpos/audio/stream_wav.py
+	sed -i.backup 's/^@micropython\.viper$/#@micropython.viper/' "$stream_wav_file"
+
+	# ── Compile mpy-cross (required for frozen manifest) ──────────────────
+	echo "Compiling mpy-cross..."
+	make -C "$codebasedir"/lvgl_micropython/lib/micropython/mpy-cross
+
+	# ── Build via upstream ports/webassembly Makefile ─────────────────────
+	manifest=$(readlink -f "$codebasedir"/manifests/manifest.py)
+	wasm_port_dir="$codebasedir"/lvgl_micropython/lib/micropython/ports/webassembly
+	wasm_user_c_modules=$(readlink -f "$codebasedir"/c_mpos/micropython_wasm.mk)
+
+	echo "Building MicroPython WASM..."
+	set -x
+	make -C "$wasm_port_dir" \
+		USER_C_MODULES="$wasm_user_c_modules" \
+		FROZEN_MANIFEST="$manifest"
+	set +x
+
+	# ── Stage build artefacts ─────────────────────────────────────────────
+	build_out="$codebasedir"/lvgl_micropython/build
+	mkdir -p "$build_out"
+	cp "$wasm_port_dir"/build-standard/micropython.mjs "$build_out"/micropython.mjs
+	cp "$wasm_port_dir"/build-standard/micropython.wasm "$build_out"/micropython.wasm
+	# Copy the HTML shell so all artefacts are in one directory.
+	cp "$codebasedir"/html/index.html "$build_out"/index.html
+
+	echo "WASM build complete.  Artefacts:"
+	echo "  $build_out/micropython.mjs"
+	echo "  $build_out/micropython.wasm"
+	echo "  $build_out/index.html"
+	echo ""
+	echo "To serve locally with the required COOP/COEP headers, run:"
+	echo "  emrun --no_browser $build_out"
+	echo "or use any server that sets:"
+	echo "  Cross-Origin-Opener-Policy: same-origin"
+	echo "  Cross-Origin-Embedder-Policy: require-corp"
+
+	# ── Restore @micropython.viper ────────────────────────────────────────
+	echo "Restoring @micropython.viper decorator..."
+	sed -i.backup 's/^#@micropython\.viper$/@micropython.viper/' "$stream_wav_file"
+	rm "$stream_wav_file".backup
+
 else
 	echo "invalid target $target"
 fi
